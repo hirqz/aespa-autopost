@@ -22,6 +22,7 @@ jobs:
   autopost:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: dev   # secrets & variables diambil dari environment "dev"
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +37,8 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          ACCOUNTS: ${{ vars.ACCOUNTS }}   # kalau kosong, pakai daftar di config.py
+          TOPIC_ID: ${{ vars.TOPIC_ID }}
         run: python x_to_telegram.py "${{ github.event.inputs.mode || 'run' }}"
 
       - name: Simpan state
