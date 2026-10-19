@@ -352,17 +352,30 @@ def run():
     save_state(state)
 
 
+def report(text):
+    """Tampilkan hasil di log, di halaman Summary run, dan di Telegram."""
+    print(text)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write("```\n" + text + "\n```\n")
+    if BOT_TOKEN and CHAT_ID:
+        tg("sendMessage", {"chat_id": CHAT_ID, "text": text}, topic=C.BOTH_TOPIC)
+
+
 def diagnose():
-    user = ACCOUNTS[0]
-    for url in syndication_urls(user):
-        try:
-            r = requests.get(url, timeout=30, headers={"User-Agent": UA})
-            print(f"{url.split('/')[2]} -> HTTP {r.status_code} | {len(r.text)} byte | "
-                  f"tweet: {len(parse_timeline(r.text))} | "
-                  f"rate-limit-reset: {r.headers.get('x-rate-limit-reset', '-')} | "
-                  f"retry-after: {r.headers.get('retry-after', '-')}")
-        except requests.RequestException as e:
-            print(f"{url.split('/')[2]} -> error: {e}")
+    lines = ["🩺 Diagnose (GitHub Actions)"]
+    for user in ACCOUNTS[:2]:
+        for url in syndication_urls(user):
+            host = url.split('/')[2]
+            try:
+                r = requests.get(url, timeout=30, headers={"User-Agent": UA})
+                lines.append(f"{user} @ {host} -> HTTP {r.status_code} | "
+                             f"tweet: {len(parse_timeline(r.text))} | {len(r.text)} byte | "
+                             f"retry-after: {r.headers.get('retry-after', '-')}")
+            except requests.RequestException as e:
+                lines.append(f"{user} @ {host} -> error: {type(e).__name__}")
+    report("\n".join(lines))
 
 
 def main():
