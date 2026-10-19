@@ -1,0 +1,51 @@
+name: Auto post X ke Telegram
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # tiap 5 menit (GitHub sering telat beberapa menit, itu normal)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Mode"
+        type: choice
+        default: run
+        options: [run, test, diagnose, reset]
+
+permissions:
+  contents: write   # untuk menyimpan state.json kembali ke repo
+
+concurrency:
+  group: autopost
+  cancel-in-progress: false
+
+jobs:
+  autopost:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Jalankan
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python x_to_telegram.py "${{ github.event.inputs.mode || 'run' }}"
+
+      - name: Simpan state
+        if: always()
+        run: |
+          git config user.name "autopost-bot"
+          git config user.email "autopost-bot@users.noreply.github.com"
+          git add state.json 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "update state [skip ci]"
+            git pull --rebase --autostash || true
+            git push
+          fi
