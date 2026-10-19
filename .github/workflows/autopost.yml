@@ -1,15 +1,21 @@
 name: Auto post X ke Telegram
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # tiap 5 menit (GitHub sering telat beberapa menit, itu normal)
+  # Jadwal otomatis dimatikan sementara selama uji coba.
+  # Hapus tanda # di dua baris berikut untuk menyalakannya lagi.
+  # schedule:
+  #   - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       mode:
         description: "Mode"
         type: choice
-        default: run
-        options: [run, test, diagnose, reset]
+        default: viewer_test
+        options: [viewer_test, run, test, diagnose, reset]
+      user:
+        description: "Akun untuk viewer_test"
+        type: string
+        default: aespa_official
 
 permissions:
   contents: write   # untuk menyimpan state.json kembali ke repo
@@ -33,16 +39,28 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      - name: Install browser (khusus viewer_test)
+        if: github.event.inputs.mode == 'viewer_test'
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
       - name: Jalankan
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           ACCOUNTS: ${{ vars.ACCOUNTS }}   # kalau kosong, pakai daftar di config.py
           TOPIC_ID: ${{ vars.TOPIC_ID }}
-        run: python x_to_telegram.py "${{ github.event.inputs.mode || 'run' }}"
+          TEST_USER: ${{ github.event.inputs.user }}
+        run: |
+          if [ "${{ github.event.inputs.mode }}" = "viewer_test" ]; then
+            python viewer_test.py
+          else
+            python x_to_telegram.py "${{ github.event.inputs.mode || 'run' }}"
+          fi
 
       - name: Simpan state
-        if: always()
+        if: always() && github.event.inputs.mode != 'viewer_test'
         run: |
           git config user.name "autopost-bot"
           git config user.email "autopost-bot@users.noreply.github.com"
