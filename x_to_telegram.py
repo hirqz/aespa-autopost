@@ -27,6 +27,10 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 DEFAULT_TOPIC = os.environ.get("TOPIC_ID", "").strip()
 
+# Daftar akun: variable ACCOUNTS (GitHub) kalau diisi, kalau tidak pakai config.py
+_env_accounts = [a.strip().lstrip("@") for a in os.environ.get("ACCOUNTS", "").split(",") if a.strip()]
+ACCOUNTS = _env_accounts or C.ACCOUNTS
+
 
 # ============================ STATE ============================
 
@@ -335,7 +339,7 @@ def run():
     if state["cooldown_until"] > now:
         print(f"Masih jeda rate limit X, sisa {int((state['cooldown_until'] - now) / 60)} menit. Lewati.")
         return
-    for acc in C.ACCOUNTS:
+    for acc in ACCOUNTS:
         acc = acc.strip().lstrip("@")
         if not acc:
             continue
@@ -349,7 +353,7 @@ def run():
 
 
 def diagnose():
-    user = C.ACCOUNTS[0]
+    user = ACCOUNTS[0]
     for url in syndication_urls(user):
         try:
             r = requests.get(url, timeout=30, headers={"User-Agent": UA})
