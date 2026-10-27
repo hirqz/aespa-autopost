@@ -9,6 +9,7 @@ Cara pakai:
   python autopost.py reset   # lupakan riwayat, mulai lagi dari tweet terbaru
   python autopost.py backfill 3   # kirim ulang tweet 3 jam terakhir yang terlewat
 """
+import html
 import json
 import logging
 import os
@@ -98,7 +99,7 @@ def normalize(result):
     t = dict(legacy)
     t["id_str"] = legacy.get("id_str") or result.get("rest_id")
     note = (((result.get("note_tweet") or {}).get("note_tweet_results") or {}).get("result") or {})
-    t["full_text"] = note.get("text") or legacy.get("full_text") or ""
+    t["full_text"] = html.unescape(note.get("text") or legacy.get("full_text") or "")  # &amp; -> &
     t["user"] = {"screen_name": _user_screen_name(result)}
     rt = ((legacy.get("retweeted_status_result") or {}).get("result"))
     t["retweeted_status"] = normalize(rt) if rt else None
@@ -195,34 +196,66 @@ def orig_photo_url(u):
     return f"{m.group(1)}?format={m.group(2).lower()}&name=orig"
 
 
+def photo_urls(u):
+    """URL foto berurutan dari kualitas tertinggi: orig -> 4096x4096 -> large -> asli."""
+    base = re.sub(r"\?.*$", "", u)
+    m = re.match(r"^(.*)\.(jpe?g|png|webp)$", base, re.I)
+    if m:
+        stem, fmt = m.group(1), m.group(2).lower()
+        cands = [f"{stem}?format={fmt}&name={n}" for n in ("orig", "4096x4096", "large")]
+    else:
+        cands = [f"{base}?name={n}" for n in ("orig", "4096x4096", "large")]
+    return cands + [u]
+
+
+def orig_photo_url(u):
+    return photo_urls(u)[0]
+
+
 def extract_media(src):
     lst = (src.get("extended_entities") or src.get("entities") or {}).get("media", [])
     out = []
     for m in lst:
         if m.get("type") == "photo":
-            out.append({"kind": "photo", "url": orig_photo_url(m["media_url_https"])})
-        else:  # video / animated_gif
+            urls = photo_urls(m["media_url_https"])
+            out.append({"kind": "photo", "url": urls[0], "urls": urls})
+        else:  # video / animated_gif: semua varian mp4, bitrate tertinggi dulu
             vs = [v for v in (m.get("video_info") or {}).get("variants", [])
                   if v.get("content_type") == "video/mp4"]
             vs.sort(key=lambda v: v.get("bitrate", 0), reverse=True)
             if vs:
-                out.append({"kind": "video", "url": vs[0]["url"]})
+                out.append({"kind": "video", "url": vs[0]["url"], "urls": [v["url"] for v in vs]})
     return out
 
 
 def download(item, base, idx):
-    try:
-        r = requests.get(item["url"], timeout=120, headers={"User-Agent": "Mozilla/5.0"})
-    except requests.RequestException:
-        return None
-    if r.status_code != 200 or len(r.content) > MAX_UPLOAD_BYTES:
-        return None
-    if item["kind"] == "video":
-        ext = "mp4"
-    else:
-        m = re.search(r"format=(\w+)", item["url"])
-        ext = m.group(1) if m else "jpg"
-    return (f"{base}_{idx + 1}.{ext}", r.content)
+    """Unduh media; coba ulang & turun ke kualitas berikutnya kalau gagal / >50MB."""
+    reasons = []
+    for url in item.get("urls") or [item["url"]]:
+        for attempt in range(3):
+            try:
+                r = requests.get(url, timeout=120, headers={"User-Agent": "Mozilla/5.0",
+                                                            "Referer": "https://x.com/"})
+            except requests.RequestException as e:
+                reasons.append(type(e).__name__)
+                time.sleep(2 * (attempt + 1))
+                continue
+            if r.status_code == 200 and r.content:
+                if len(r.content) > MAX_UPLOAD_BYTES:
+                    reasons.append(">50MB")
+                    break  # coba varian berikutnya (kualitas lebih rendah)
+                if item["kind"] == "video":
+                    ext = "mp4"
+                else:
+                    m = re.search(r"format=(\w+)", url)
+                    ext = m.group(1) if m else "jpg"
+                return (f"{base}_{idx + 1}.{ext}", r.content)
+            reasons.append(f"HTTP {r.status_code}")
+            if r.status_code in (404, 410):
+                break  # URL ini memang tidak ada, coba URL berikutnya
+            time.sleep(2 * (attempt + 1))
+    log(f"Gagal unduh media {idx + 1} ({item['kind']}): {', '.join(reasons[-4:])}")
+    return None
 
 
 # ============================ TELEGRAM ============================
@@ -303,7 +336,7 @@ def send_tweet(t, src, media, user, topic):
             continue
         (photos if item["kind"] == "photo" else videos).append({"kind": item["kind"], "file": f})
     if failed:
-        caption += "\n⚠️ Sebagian media >50MB / gagal diunduh, lihat di link."
+        caption += f"\n⚠️ {failed} dari {len(media)} media gagal diunduh, lihat di link."
     if not photos and not videos:
         return tg("sendMessage", {"chat_id": CHAT_ID, "text": caption}, topic=topic)
 
@@ -392,7 +425,74 @@ def open_browser(pw, headless=None):
         return pw.chromium.launch_persistent_context(**kwargs)                    # Chromium bawaan Playwright
 
 
-def collect(page):
+DIALOG_SEL = '[role="dialog"], [data-testid="sheetDialog"], [data-testid="confirmationSheetDialog"]'
+# Tombol "aman" untuk menutup popup. Tombol konfirmasi akun (Yes / Update email / Verify) TIDAK diklik otomatis.
+SAFE_BUTTON = re.compile(r"^(close|not now|skip|dismiss|got it|maybe later|no thanks|"
+                         r"tutup|nanti saja|lewati|lain kali|tidak sekarang|oke|ok)$", re.I)
+
+
+def blocking_dialog_text(page):
+    """Teks popup yang sedang menutupi halaman ('' kalau tidak ada)."""
+    try:
+        dlg = page.locator(DIALOG_SEL).first
+        if dlg.count() and dlg.is_visible():
+            return re.sub(r"\s+", " ", dlg.inner_text(timeout=3000)).strip()[:200]
+    except Exception:
+        pass
+    return ""
+
+
+def dismiss_dialogs(page):
+    """Coba tutup popup dengan Escape / tombol Close / Not now. Return teks popup yang masih tersisa."""
+    for _ in range(3):
+        text = blocking_dialog_text(page)
+        if not text:
+            return ""
+        log(f"Popup X terdeteksi: {text[:120]}")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(1500)
+        if not blocking_dialog_text(page):
+            log("Popup tertutup dengan Escape.")
+            return ""
+        try:
+            dlg = page.locator(DIALOG_SEL).first
+            closed = False
+            close_btn = dlg.locator('[aria-label="Close"], [aria-label="Tutup"], [data-testid="app-bar-close"]').first
+            if close_btn.count():
+                close_btn.click(timeout=3000)
+                closed = True
+            else:
+                for b in dlg.get_by_role("button").all():
+                    label = (b.inner_text(timeout=1000) or "").strip()
+                    if SAFE_BUTTON.match(label):
+                        b.click(timeout=3000)
+                        log(f"Klik tombol popup: {label}")
+                        closed = True
+                        break
+            if not closed:
+                break
+        except Exception:
+            break
+        page.wait_for_timeout(1500)
+    return blocking_dialog_text(page)
+
+
+def alert_with_screenshot(page, text, state, key):
+    """Peringatan + screenshot layar bot ke Telegram (maks sekali per 3 jam per jenis)."""
+    now = time.time()
+    if now - state.get(key, 0) < 3 * 3600:
+        return
+    try:
+        png = page.screenshot()
+        tg("sendPhoto", {"chat_id": CHAT_ID, "caption": ("⚠️ autopost: " + text)[:1000]},
+           files={"photo": ("bot.png", png)}, topic=C.BOTH_TOPIC)
+    except Exception:
+        tg("sendMessage", {"chat_id": CHAT_ID, "text": "⚠️ autopost: " + text}, topic=C.BOTH_TOPIC)
+    state[key] = now
+    save_state(state)
+
+
+def collect(page, state=None):
     captured = []
 
     def on_response(resp):
@@ -409,11 +509,24 @@ def collect(page):
         page.wait_for_timeout(4000)
         if "/login" in page.url or "/i/flow" in page.url or "logout" in page.url:
             raise NotLoggedIn()
+        left = dismiss_dialogs(page)
+        if left and state is not None:
+            log("Popup tidak bisa ditutup otomatis. Butuh tindakan manual di jendela Chrome bot.")
+            alert_with_screenshot(page, "ada popup X yang menutupi timeline dan tidak bisa ditutup otomatis: "
+                                  f"\"{left[:150]}\". Buka PC, selesaikan popup di jendela Chrome bot.",
+                                  state, "last_dialog_alert")
         try:  # pastikan tab Following (kronologis) yang aktif
             page.get_by_role("tab", name=re.compile(r"^(Following|Mengikuti)$", re.I)).first.click(timeout=8000)
         except Exception:
             pass
         page.wait_for_timeout(random.randint(4000, 6000))
+        try:  # tombol "Show N posts" -> muat tweet terbaru
+            pill = page.get_by_text(re.compile(r"^(Show \d+ posts?|Tampilkan \d+ (posting|postingan))$", re.I)).first
+            if pill.count():
+                pill.click(timeout=3000)
+                page.wait_for_timeout(3000)
+        except Exception:
+            pass
         for _ in range(C.SCROLLS_PER_CHECK):
             page.mouse.wheel(0, random.randint(2500, 3500))
             page.wait_for_timeout(random.randint(2000, 3500))
@@ -427,6 +540,32 @@ def collect(page):
     if not captured:
         log("Peringatan: data timeline tidak tertangkap (halaman lambat / tampilan X berubah?).")
     return tweets
+
+
+class StaleTimeline(Exception):
+    pass
+
+
+def check_fresh(page, tweets, state):
+    """Deteksi timeline 'macet': tweet terbaru yang tertangkap tidak berubah terlalu lama."""
+    stale_hours = getattr(C, "STALE_HOURS", 3)
+    now = time.time()
+    newest = max((int(t["id_str"]) for t in tweets), default=0)
+    if newest > state.get("newest_id", 0):
+        state["newest_id"] = newest
+        state["newest_changed_at"] = now
+        save_state(state)
+        return
+    state.setdefault("newest_changed_at", now)
+    idle_h = (now - state["newest_changed_at"]) / 3600
+    if idle_h >= stale_hours:
+        log(f"Timeline tidak bergerak {idle_h:.1f} jam. Browser akan dibuka ulang.")
+        alert_with_screenshot(page, f"timeline X tidak bergerak {idle_h:.0f} jam (popup / logout / X bermasalah?). "
+                              "Bot membuka ulang browser. Kalau peringatan ini berulang, cek layar PC.",
+                              state, "last_stale_alert")
+        state["newest_changed_at"] = now  # beri waktu sebelum peringatan berikutnya
+        save_state(state)
+        raise StaleTimeline()
 
 
 def alert(text, state):
@@ -452,7 +591,20 @@ def run(loop=True):
                     ctx = open_browser(pw)
                     started = time.time()
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                process(collect(page), state)
+                last = state.get("last_check", 0)
+                if last and time.time() - last > C.CHECK_EVERY_MINUTES * 60 * 4:
+                    log(f"Catatan: jeda sejak cek terakhir {(time.time() - last) / 3600:.1f} jam "
+                        "(PC sempat sleep / hang?).")
+                state["last_check"] = time.time()
+                tweets = collect(page, state)
+                process(tweets, state)
+                check_fresh(page, tweets, state)
+            except StaleTimeline:
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+                ctx = None
             except NotLoggedIn:
                 log("Akun X tidak dalam keadaan login. Jalankan: python autopost.py login")
                 alert("akun X cadangan logout. Jalankan login.bat di PC.", state)
