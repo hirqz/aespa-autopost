@@ -1,0 +1,18 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments & Profiles (Menghindari upload profil browser otomatis)
+chrome-profile/
+
+# Logs and databases
+*.log
+state.json
+
+# Configuration and secrets (Sangat penting agar data sensitif tidak bocor)
+secrets.json
+
+# OS-generated files
+.DS_Store
+Thumbs.db
