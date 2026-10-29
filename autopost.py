@@ -492,7 +492,7 @@ def alert_with_screenshot(page, text, state, key):
     save_state(state)
 
 
-def collect(page, state=None):
+def collect(page, state=None, cover_since_ms=0):
     captured = []
 
     def on_response(resp):
@@ -530,7 +530,30 @@ def collect(page, state=None):
         for _ in range(C.SCROLLS_PER_CHECK):
             page.mouse.wheel(0, random.randint(2500, 3500))
             page.wait_for_timeout(random.randint(2000, 3500))
-        page.mouse.wheel(0, -20000)  # kembali ke atas
+
+        # Mengejar ketinggalan: scroll terus sampai tweet tertua yang terbaca lebih tua dari
+        # pengecekan sukses terakhir, supaya tweet selama PC mati / restart tidak terlewat.
+        if cover_since_ms:
+            max_extra = getattr(C, "MAX_CATCHUP_SCROLLS", 40)
+            extra = 0
+            while extra < max_extra:
+                ts = [t for d in captured for t in parse_timeline_json(d)]
+                oldest = min((tweet_time_ms(t["id_str"]) for t in ts), default=None)
+                if oldest is not None and oldest <= cover_since_ms:
+                    break
+                page.mouse.wheel(0, random.randint(2500, 3500))
+                page.wait_for_timeout(random.randint(2000, 3500))
+                extra += 1
+            if extra:
+                ts = [t for d in captured for t in parse_timeline_json(d)]
+                oldest = min((tweet_time_ms(t["id_str"]) for t in ts), default=None)
+                covered = oldest is not None and oldest <= cover_since_ms
+                log(f"Mengejar ketinggalan: scroll tambahan {extra}x, {len(ts)} tweet terbaca"
+                    + ("" if covered else " — BATAS SCROLL TERCAPAI, tweet paling awal mungkin terlewat"))
+                if not covered and state is not None:
+                    alert("bot sempat mati lama; sebagian tweet paling awal selama jeda mungkin terlewat "
+                          "(batas MAX_CATCHUP_SCROLLS tercapai).", state)
+        page.mouse.wheel(0, -50000)  # kembali ke atas
     finally:
         page.remove_listener("response", on_response)
 
@@ -596,8 +619,13 @@ def run(loop=True):
                     log(f"Catatan: jeda sejak cek terakhir {(time.time() - last) / 3600:.1f} jam "
                         "(PC sempat sleep / hang?).")
                 state["last_check"] = time.time()
-                tweets = collect(page, state)
+                last_ok = state.get("last_ok", 0)
+                cover = int((last_ok - 600) * 1000) if last_ok else 0   # mundur 10 menit untuk aman
+                tweets = collect(page, state, cover_since_ms=cover)
                 process(tweets, state)
+                if tweets:  # hanya dianggap sukses kalau timeline benar-benar terbaca
+                    state["last_ok"] = time.time()
+                    save_state(state)
                 check_fresh(page, tweets, state)
             except StaleTimeline:
                 try:
