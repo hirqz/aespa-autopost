@@ -415,10 +415,43 @@ class NotLoggedIn(Exception):
     pass
 
 
+class XErrorPage(Exception):
+    """Halaman 'Something went wrong' dari X (biasanya rate limit sementara / gangguan X)."""
+    pass
+
+
+X_ERROR_TEXT = re.compile(r"something went wrong|terjadi kesalahan|ada yang salah", re.I)
+
+
+def x_error_page(page):
+    try:
+        return page.get_by_text(X_ERROR_TEXT).first.is_visible(timeout=1500)
+    except Exception:
+        return False
+
+
+def check_x_error(page):
+    """Kalau muncul halaman error X: klik 'Try again' sekali; kalau masih error -> XErrorPage."""
+    if not x_error_page(page):
+        return
+    log("Halaman error X terdeteksi ('Something went wrong'). Mencoba 'Try again' sekali...")
+    try:
+        page.get_by_role("button", name=re.compile(r"^(try again|coba lagi|retry)$", re.I)).first.click(timeout=5000)
+        page.wait_for_timeout(8000)
+    except Exception:
+        pass
+    if x_error_page(page):
+        raise XErrorPage()
+
+
 def open_browser(pw, headless=None):
     headless = C.HEADLESS if headless is None else headless
     kwargs = dict(user_data_dir=PROFILE_DIR, headless=headless, viewport={"width": 1280, "height": 900},
-                  args=["--disable-blink-features=AutomationControlled"])
+                  args=["--disable-blink-features=AutomationControlled",
+                        # tetap aktif walau layar terkunci / jendela tertutup / di-minimize
+                        "--disable-backgrounding-occluded-windows",
+                        "--disable-renderer-backgrounding",
+                        "--disable-background-timer-throttling"])
     try:
         return pw.chromium.launch_persistent_context(channel="chrome", **kwargs)  # Chrome yang terpasang
     except Exception:
@@ -509,6 +542,7 @@ def collect(page, state=None, cover_since_ms=0):
         page.wait_for_timeout(4000)
         if "/login" in page.url or "/i/flow" in page.url or "logout" in page.url:
             raise NotLoggedIn()
+        check_x_error(page)
         left = dismiss_dialogs(page)
         if left and state is not None:
             log("Popup tidak bisa ditutup otomatis. Butuh tindakan manual di jendela Chrome bot.")
@@ -533,27 +567,45 @@ def collect(page, state=None, cover_since_ms=0):
 
         # Mengejar ketinggalan: scroll terus sampai tweet tertua yang terbaca lebih tua dari
         # pengecekan sukses terakhir, supaya tweet selama PC mati / restart tidak terlewat.
-        if cover_since_ms:
-            max_extra = getattr(C, "MAX_CATCHUP_SCROLLS", 40)
-            extra = 0
+        if cover_since_ms and not captured:
+            check_x_error(page)   # timeline kosong: jangan mengejar ketinggalan di halaman error
+        if cover_since_ms and captured:
+            max_extra = getattr(C, "MAX_CATCHUP_SCROLLS", 25)
+            extra = stuck = 0
+            prev_count = -1
+            covered = False
             while extra < max_extra:
                 ts = [t for d in captured for t in parse_timeline_json(d)]
                 oldest = min((tweet_time_ms(t["id_str"]) for t in ts), default=None)
                 if oldest is not None and oldest <= cover_since_ms:
+                    covered = True
                     break
+                stuck = stuck + 1 if len(ts) == prev_count else 0
+                if stuck >= 4:      # 4x scroll tanpa tweet baru termuat -> X tidak memuat lebih jauh
+                    break
+                prev_count = len(ts)
+                page.keyboard.press("End")          # scroll paling bawah (pemicu muat lanjutan)
                 page.mouse.wheel(0, random.randint(2500, 3500))
-                page.wait_for_timeout(random.randint(2000, 3500))
+                page.wait_for_timeout(random.randint(2500, 4000))
                 extra += 1
             if extra:
                 ts = [t for d in captured for t in parse_timeline_json(d)]
                 oldest = min((tweet_time_ms(t["id_str"]) for t in ts), default=None)
-                covered = oldest is not None and oldest <= cover_since_ms
-                log(f"Mengejar ketinggalan: scroll tambahan {extra}x, {len(ts)} tweet terbaca"
-                    + ("" if covered else " — BATAS SCROLL TERCAPAI, tweet paling awal mungkin terlewat"))
-                if not covered and state is not None:
-                    alert("bot sempat mati lama; sebagian tweet paling awal selama jeda mungkin terlewat "
-                          "(batas MAX_CATCHUP_SCROLLS tercapai).", state)
+                covered = covered or (oldest is not None and oldest <= cover_since_ms)
+                reach_h = (time.time() * 1000 - oldest) / 3600000 if oldest else 0
+                gap_h = (time.time() * 1000 - cover_since_ms) / 3600000
+                if covered:
+                    log(f"Mengejar ketinggalan: scroll tambahan {extra}x, {len(ts)} tweet, lengkap.")
+                else:
+                    why = "X berhenti memuat tweet lama" if stuck >= 4 else "batas MAX_CATCHUP_SCROLLS"
+                    log(f"Mengejar ketinggalan TIDAK lengkap ({why}): scroll {extra}x, {len(ts)} tweet, "
+                        f"terbaca {reach_h:.1f} jam ke belakang dari jeda {gap_h:.1f} jam.")
+                    if state is not None:
+                        alert(f"mengejar ketinggalan tidak lengkap ({why}): terbaca {reach_h:.1f} jam "
+                              f"dari jeda {gap_h:.1f} jam. Tweet sebelum itu mungkin terlewat.", state)
         page.mouse.wheel(0, -50000)  # kembali ke atas
+        if not captured:
+            check_x_error(page)
     finally:
         page.remove_listener("response", on_response)
 
@@ -625,8 +677,22 @@ def run(loop=True):
                 process(tweets, state)
                 if tweets:  # hanya dianggap sukses kalau timeline benar-benar terbaca
                     state["last_ok"] = time.time()
+                    state["x_error_count"] = 0
                     save_state(state)
                 check_fresh(page, tweets, state)
+            except XErrorPage:
+                n = state.get("x_error_count", 0) + 1
+                state["x_error_count"] = n
+                pause_min = min(15 * 2 ** (n - 1), 120)          # 15, 30, 60, 120, 120 ... menit
+                state["pause_until"] = time.time() + pause_min * 60
+                save_state(state)
+                log(f"X menampilkan 'Something went wrong' (ke-{n} berturut-turut). "
+                    f"Kemungkinan rate limit sementara. Bot istirahat {pause_min} menit.")
+                if n >= 3:
+                    alert_with_screenshot(page, f"X terus menampilkan 'Something went wrong' ({n}x berturut-turut). "
+                                          f"Bot istirahat {pause_min} menit lalu mencoba lagi otomatis. "
+                                          "Kalau berlanjut berjam-jam, coba buka x.com manual di Chrome bot.",
+                                          state, "last_xerror_alert")
             except StaleTimeline:
                 try:
                     ctx.close()
@@ -647,6 +713,7 @@ def run(loop=True):
             if not loop:
                 break
             wait = C.CHECK_EVERY_MINUTES * 60 * random.uniform(0.8, 1.2)
+            wait = max(wait, state.get("pause_until", 0) - time.time())
             log(f"Cek berikutnya dalam {wait / 60:.1f} menit.")
             time.sleep(wait)
         if ctx:
