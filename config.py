@@ -51,6 +51,14 @@ ACCOUNT_RULES = {
     "snowdrop_010101": {"all": "winter"},
     "hourlykrn":       {"all": "karina"},
     "hourlykwinter":   {"all": "winter"},
+    "mandubluu":      {"all": "karina"},
+    "MyWinterWorld":   {"all": "winter"},
+    "fc__mobile":       {"karina": ["Karina"], "winter": ["Winter"]},
+    "notes0411":      {"all": "karina"},
+    "karinaofmoment": {"all": "karina"}, 
+    "joyminjeong":    {"all": "winter"},
+    "winteraphy": {"all": "winter"},
+    "mjkmwntr": {"all": "winter"},
 }
 
 SEND_UNMATCHED = False   # tweet tanpa nama member: False = skip
