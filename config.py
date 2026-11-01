@@ -15,6 +15,19 @@ ACCOUNTS = [
     "sunshine_080507",
     "hourlykrn",
     "hourlykwinter",
+    "mandubluu",
+    "MyWinterWorld",
+    "fc__mobile",
+    "notes0411",
+    "karinaofmoment",
+    "joyminjeong",
+    "winteraphy",
+    "mjkmwntr",
+    "hiura88",
+    "dolldollmin",
+    "stupidcheesecat",
+    "soshirevelae",
+    "yjmsmine",
 ]
 
 # send: True = dikirim, False = di-skip
