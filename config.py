@@ -48,7 +48,11 @@ MEMBERS = {
         "ryujin", "류진", "yeji", "예지", "itzy",
         "wonyoung", "원영", "minji", "민지", "newjeans",
         "seulgi", "슬기", "irene", "아이린",
-        "han sua", "한수아",
+        "han sua", "한수아", "lee sua", "이수아", "sua", "수아", "le sserafim",
+        "jisoo", "지수", "rose", "로제", "jennie", "제니", "lisa", "리사", "blackpink",
+        "taeyeon", "태연", "yoona", "윤아", "sunny",
+        "yeri", "예리", "seohyun", "서현", "tiffany", "티파니", "snsd", "girls' generation",
+        "joy",
     ]},
 }
 
@@ -72,6 +76,8 @@ ACCOUNT_RULES = {
     "joyminjeong":    {"all": "winter"},
     "winteraphy": {"all": "winter"},
     "mjkmwntr": {"all": "winter"},
+    "soshirevelae": {"all": "winter"},
+    "stupidcheesecat": {"all": "winter"},
 }
 
 SEND_UNMATCHED = False   # tweet tanpa nama member: False = skip
