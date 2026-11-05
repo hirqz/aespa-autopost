@@ -525,7 +525,12 @@ def alert_with_screenshot(page, text, state, key):
     save_state(state)
 
 
+LAST_CAPTURE_OK = False   # True kalau X mengirim respons timeline (walau isinya 0 tweet baru)
+
+
 def collect(page, state=None, cover_since_ms=0):
+    global LAST_CAPTURE_OK
+    LAST_CAPTURE_OK = False
     captured = []
 
     def on_response(resp):
@@ -569,7 +574,12 @@ def collect(page, state=None, cover_since_ms=0):
         # pengecekan sukses terakhir, supaya tweet selama PC mati / restart tidak terlewat.
         if cover_since_ms and not captured:
             check_x_error(page)   # timeline kosong: jangan mengejar ketinggalan di halaman error
-        if cover_since_ms and captured:
+        has_tweets = any(parse_timeline_json(d) for d in captured)
+        if cover_since_ms and captured and not has_tweets:
+            # X menampilkan timeline dari cache & hanya mengirim "tweet baru sejak terakhir dilihat".
+            # Respons kosong = memang belum ada tweet baru, bukan gagal -> tidak perlu mengejar.
+            log("Timeline dari cache: tidak ada tweet baru sejak terakhir dilihat.")
+        if cover_since_ms and captured and has_tweets:
             max_extra = getattr(C, "MAX_CATCHUP_SCROLLS", 25)
             extra = stuck = 0
             prev_count = -1
@@ -612,6 +622,7 @@ def collect(page, state=None, cover_since_ms=0):
     tweets = []
     for data in captured:
         tweets.extend(parse_timeline_json(data))
+    LAST_CAPTURE_OK = bool(captured)
     if not captured:
         log("Peringatan: data timeline tidak tertangkap (halaman lambat / tampilan X berubah?).")
     return tweets
@@ -675,7 +686,7 @@ def run(loop=True):
                 cover = int((last_ok - 600) * 1000) if last_ok else 0   # mundur 10 menit untuk aman
                 tweets = collect(page, state, cover_since_ms=cover)
                 process(tweets, state)
-                if tweets:  # hanya dianggap sukses kalau timeline benar-benar terbaca
+                if tweets or LAST_CAPTURE_OK:  # sukses = X merespons (0 tweet baru juga sah)
                     state["last_ok"] = time.time()
                     state["x_error_count"] = 0
                     save_state(state)
