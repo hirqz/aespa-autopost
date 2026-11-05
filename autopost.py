@@ -91,7 +91,7 @@ def normalize(result):
     """Ubah objek tweet GraphQL x.com menjadi format sederhana."""
     if not isinstance(result, dict):
         return None
-    if result.get("__typename") == "TweetWithVisibilityResults":
+    if result.get("__typename") == "TweetWithVisibilityResults" or ("tweet" in result and "legacy" not in result):
         result = result.get("tweet") or {}
     legacy = result.get("legacy")
     if not legacy:
@@ -125,23 +125,44 @@ def _find_instructions(obj):
 
 
 def parse_timeline_json(data):
-    tweets = []
+    """Ambil semua tweet dari respons timeline. Mencari 'tweet_results' di mana pun dalam JSON,
+    supaya tetap jalan walau X memindahkan posisi data di dalam respons."""
+    tweets, seen_ids = [], set()
 
-    def take(item_content):
-        if not item_content or "promotedMetadata" in item_content:   # lewati iklan
-            return
-        t = normalize((item_content.get("tweet_results") or {}).get("result"))
-        if t:
-            tweets.append(t)
+    def walk(o, promoted=False):
+        if isinstance(o, dict):
+            promoted = promoted or "promotedMetadata" in o          # lewati iklan
+            tr = o.get("tweet_results")
+            if isinstance(tr, dict):
+                t = None if promoted else normalize(tr.get("result"))
+                if t and t["id_str"] not in seen_ids:
+                    seen_ids.add(t["id_str"])
+                    tweets.append(t)
+            for k, v in o.items():
+                if k in ("tweet_results", "retweeted_status_result", "quoted_status_result"):
+                    continue    # sudah diproses / bagian dari tweet lain
+                walk(v, promoted)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, promoted)
 
-    for ins in _find_instructions(data) or []:
-        entries = ins.get("entries") or ([ins["entry"]] if ins.get("entry") else [])
-        for e in entries:
-            content = e.get("content") or {}
-            take(content.get("itemContent"))
-            for it in content.get("items") or []:       # thread / modul percakapan
-                take((it.get("item") or {}).get("itemContent"))
+    walk(data)
     return tweets
+
+
+def dump_debug(captured_meta):
+    """Simpan respons timeline mentah ke debug_timeline.json untuk diperiksa."""
+    path = os.path.join(BASE, "debug_timeline.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(captured_meta, f, ensure_ascii=False)
+        size = os.path.getsize(path)
+        if size > 3_000_000:   # potong kalau terlalu besar
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(captured_meta[:1], f, ensure_ascii=False)
+        log(f"Respons timeline mentah disimpan ke debug_timeline.json ({os.path.getsize(path) // 1024} KB).")
+    except Exception as e:
+        log(f"Gagal menyimpan debug_timeline.json: {e}")
 
 
 # ============================ FILTER MEMBER ============================
@@ -532,12 +553,21 @@ def collect(page, state=None, cover_since_ms=0):
     global LAST_CAPTURE_OK
     LAST_CAPTURE_OK = False
     captured = []
+    captured_meta = []
+
+    ops_seen = []
 
     def on_response(resp):
         url = resp.url
-        if "/graphql/" in url and ("HomeLatestTimeline" in url or "HomeTimeline" in url):
+        if "/graphql/" not in url:
+            return
+        op = url.split("/graphql/", 1)[1].split("?")[0].split("/")[-1]
+        ops_seen.append(op)
+        if "HomeLatestTimeline" in url or "HomeTimeline" in url:
             try:
-                captured.append(resp.json())
+                data = resp.json()
+                captured.append(data)
+                captured_meta.append({"op": op, "status": resp.status, "data": data})
             except Exception:
                 pass
 
@@ -575,10 +605,10 @@ def collect(page, state=None, cover_since_ms=0):
         if cover_since_ms and not captured:
             check_x_error(page)   # timeline kosong: jangan mengejar ketinggalan di halaman error
         has_tweets = any(parse_timeline_json(d) for d in captured)
-        if cover_since_ms and captured and not has_tweets:
-            # X menampilkan timeline dari cache & hanya mengirim "tweet baru sejak terakhir dilihat".
-            # Respons kosong = memang belum ada tweet baru, bukan gagal -> tidak perlu mengejar.
-            log("Timeline dari cache: tidak ada tweet baru sejak terakhir dilihat.")
+        if captured and not has_tweets:
+            log(f"Respons timeline diterima ({len(captured)}x) tapi 0 tweet terbaca. "
+                f"Operasi graphql terlihat: {sorted(set(ops_seen))[:15]}")
+            dump_debug(captured_meta)
         if cover_since_ms and captured and has_tweets:
             max_extra = getattr(C, "MAX_CATCHUP_SCROLLS", 25)
             extra = stuck = 0
@@ -686,10 +716,19 @@ def run(loop=True):
                 cover = int((last_ok - 600) * 1000) if last_ok else 0   # mundur 10 menit untuk aman
                 tweets = collect(page, state, cover_since_ms=cover)
                 process(tweets, state)
-                if tweets or LAST_CAPTURE_OK:  # sukses = X merespons (0 tweet baru juga sah)
+                if tweets:  # sukses hanya kalau tweet benar-benar terbaca
                     state["last_ok"] = time.time()
                     state["x_error_count"] = 0
+                    state["empty_count"] = 0
                     save_state(state)
+                elif LAST_CAPTURE_OK:
+                    state["empty_count"] = state.get("empty_count", 0) + 1
+                    save_state(state)
+                    if state["empty_count"] >= 6:   # ~30 menit berturut-turut
+                        alert_with_screenshot(page, "X mengirim data timeline tapi bot tidak bisa membaca tweet "
+                                              f"di dalamnya ({state['empty_count']}x berturut-turut). Format data X "
+                                              "kemungkinan berubah. Kirim file debug_timeline.json ke pengembang.",
+                                              state, "last_parse_alert")
                 check_fresh(page, tweets, state)
             except XErrorPage:
                 n = state.get("x_error_count", 0) + 1
