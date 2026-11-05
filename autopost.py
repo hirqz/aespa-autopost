@@ -101,6 +101,7 @@ def normalize(result):
     note = (((result.get("note_tweet") or {}).get("note_tweet_results") or {}).get("result") or {})
     t["full_text"] = html.unescape(note.get("text") or legacy.get("full_text") or "")  # &amp; -> &
     t["user"] = {"screen_name": _user_screen_name(result)}
+    t["_raw"] = result   # objek asli dari X (dipakai kalau lokasi media berubah)
     rt = ((legacy.get("retweeted_status_result") or {}).get("result"))
     t["retweeted_status"] = normalize(rt) if rt else None
     if not t["retweeted_status"]:
@@ -233,19 +234,53 @@ def orig_photo_url(u):
     return photo_urls(u)[0]
 
 
+SKIP_MEDIA_KEYS = ("retweeted_status_result", "quoted_status_result", "core", "user_results",
+                   "card", "author_community_relationship", "birdwatch_pivot", "community_results")
+
+
+def _media_items(src):
+    """Daftar objek media mentah. Lokasi standar dulu, lalu cari di mana pun dalam tweet."""
+    lst = (src.get("extended_entities") or src.get("entities") or {}).get("media") or []
+    if lst:
+        return lst
+    found, keys = [], set()
+
+    def walk(o):
+        if isinstance(o, dict):
+            url = o.get("media_url_https") or o.get("original_img_url")
+            typ = o.get("type") or o.get("__typename", "")
+            if url and isinstance(url, str) and ("pbs.twimg.com" in url or "video.twimg.com" in url):
+                k = o.get("media_key") or o.get("id_str") or url
+                if k not in keys:
+                    keys.add(k)
+                    found.append(o)
+                return
+            for k, v in o.items():
+                if k not in SKIP_MEDIA_KEYS:
+                    walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(src.get("_raw") or {})
+    return found
+
+
 def extract_media(src):
-    lst = (src.get("extended_entities") or src.get("entities") or {}).get("media", [])
     out = []
-    for m in lst:
-        if m.get("type") == "photo":
-            urls = photo_urls(m["media_url_https"])
-            out.append({"kind": "photo", "url": urls[0], "urls": urls})
-        else:  # video / animated_gif: semua varian mp4, bitrate tertinggi dulu
-            vs = [v for v in (m.get("video_info") or {}).get("variants", [])
-                  if v.get("content_type") == "video/mp4"]
-            vs.sort(key=lambda v: v.get("bitrate", 0), reverse=True)
+    for m in _media_items(src):
+        url = m.get("media_url_https") or m.get("original_img_url") or ""
+        typ = str(m.get("type") or m.get("__typename") or "").lower()
+        variants = (m.get("video_info") or {}).get("variants") or m.get("variants") or []
+        if "video" in typ or "gif" in typ or variants:
+            vs = [v for v in variants if "mp4" in str(v.get("content_type", "")) or str(v.get("url", "")).split("?")[0].endswith(".mp4")]
+            vs.sort(key=lambda v: v.get("bitrate", 0) or 0, reverse=True)
             if vs:
                 out.append({"kind": "video", "url": vs[0]["url"], "urls": [v["url"] for v in vs]})
+                continue
+        if url and "pbs.twimg.com" in url:
+            urls = photo_urls(url)
+            out.append({"kind": "photo", "url": urls[0], "urls": urls})
     return out
 
 
@@ -392,6 +427,23 @@ def process(tweets, state):
 
     new = [t for t in mine if t["id_str"] not in seen and tweet_time_ms(t["id_str"]) >= state["since_ms"]]
     new.sort(key=lambda t: int(t["id_str"]))
+
+    def _src(t):
+        return t["retweeted_status"] if "retweeted_status" in t else t
+
+    if len(new) >= 5 and not any(extract_media(_src(t)) for t in new):
+        path = os.path.join(BASE, "debug_tweets.json")
+        try:
+            sample = [{k: v for k, v in _src(t).items() if k != "retweeted_status"} for t in new[:5]]
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(sample, f, ensure_ascii=False, default=str)
+        except Exception:
+            pass
+        log(f"Semua {len(new)} tweet baru terbaca TANPA media -> kemungkinan format media X berubah. "
+            "Tweet TIDAK ditandai diproses. Contoh data disimpan ke debug_tweets.json.")
+        alert("semua tweet baru terbaca tanpa media (format data X kemungkinan berubah). "
+              "Tweet tidak ditandai, kirim debug_tweets.json ke pengembang.", state)
+        return 0
 
     sent = skipped = filtered = 0
     for t in new:
@@ -796,6 +848,7 @@ def main():
         state = load_state()
         state["since_ms"] = int((time.time() - hours * 3600) * 1000)
         state["seen"] = [i for i in state["seen"] if tweet_time_ms(i) < state["since_ms"]]
+        state["last_ok"] = state["since_ms"] / 1000   # mengejar ketinggalan scroll mundur sampai titik ini
         save_state(state)
         return print(f"OK. Tweet dari {hours:g} jam terakhir yang belum terkirim akan dikirim saat run.bat jalan.")
 
