@@ -20,7 +20,6 @@ ACCOUNTS = [
     "fc__mobile",
     "notes0411",
     "karinaofmoment",
-    "joyminjeong",
     "winteraphy",
     "mjkmwntr",
     "hiura88",
@@ -52,7 +51,7 @@ MEMBERS = {
         "jisoo", "지수", "rose", "로제", "jennie", "제니", "lisa", "리사", "blackpink",
         "taeyeon", "태연", "yoona", "윤아", "sunny",
         "yeri", "예리", "seohyun", "서현", "tiffany", "티파니", "snsd", "girls' generation",
-        "joy", "wendy", "nayeon"
+        "joy", "wendy", "nayeon", "Harassment", "Abuse", "KAIA",
     ]},
 }
 
@@ -73,7 +72,6 @@ ACCOUNT_RULES = {
     "fc__mobile":       {"karina": ["Karina"], "winter": ["Winter"]},
     "notes0411":      {"all": "karina"},
     "karinaofmoment": {"all": "karina"}, 
-    "joyminjeong":    {"all": "winter"},
     "winteraphy": {"all": "winter"},
     "mjkmwntr": {"all": "winter"},
     "soshirevelae": {"all": "winter"},
