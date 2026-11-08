@@ -52,7 +52,7 @@ MEMBERS = {
         "jisoo", "지수", "rose", "로제", "jennie", "제니", "lisa", "리사", "blackpink",
         "taeyeon", "태연", "yoona", "윤아", "sunny",
         "yeri", "예리", "seohyun", "서현", "tiffany", "티파니", "snsd", "girls' generation",
-        "joy",
+        "joy", "wendy", "nayeon"
     ]},
 }
 
