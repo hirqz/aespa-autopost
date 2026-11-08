@@ -7,7 +7,8 @@ Cara pakai:
   python autopost.py         # jalan terus (cek tiap ~5 menit)
   python autopost.py once    # satu kali pengecekan lalu berhenti (untuk uji)
   python autopost.py reset   # lupakan riwayat, mulai lagi dari tweet terbaru
-  python autopost.py backfill 3   # kirim ulang tweet 3 jam terakhir yang terlewat
+  python autopost.py backfill 3   # proses ulang tweet 3 jam terakhir (yang sudah terkirim tidak dobel)
+  python autopost.py catchup 24   # kirim tweet 24 jam terakhir yang BELUM terkirim saja
 """
 import html
 import json
@@ -66,8 +67,14 @@ def load_state():
     return s
 
 
+SENT_LIMIT = 50000   # ID tweet & media yang SUDAH TERKIRIM (disimpan jauh lebih lama dari "seen")
+
+
 def save_state(s):
     s["seen"] = s["seen"][-SEEN_LIMIT:]
+    for k in ("sent_ids", "sent_media"):
+        if k in s:
+            s[k] = s[k][-SENT_LIMIT:]
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(s, f)
@@ -264,6 +271,15 @@ def _media_items(src):
 
     walk(src.get("_raw") or {})
     return found
+
+
+MEDIA_KEY = re.compile(r"/(media|ext_tw_video|amplify_video|tweet_video)/([A-Za-z0-9_-]+)")
+
+
+def media_key(url):
+    """Identitas media yang sama walau dipakai di tweet berbeda (pbs.twimg.com/media/XXX, video id)."""
+    m = MEDIA_KEY.search(url or "")
+    return f"{m.group(1)}/{m.group(2)}" if m else ""
 
 
 def extract_media(src):
@@ -504,15 +520,28 @@ def process(tweets, state):
         return 0
 
     sent = skipped = filtered = consecutive_fail = 0
+    state["backlog_oldest_ms"] = 0
     for t in new:
         if sent >= C.MAX_POSTS_PER_RUN:
+            # antrean belum habis: ingat tweet tertua yang belum diproses supaya
+            # pengecekan berikutnya scroll mundur sampai ke situ
+            left = [x for x in new if x["id_str"] not in seen]
+            if left:
+                state["backlog_oldest_ms"] = min(tweet_time_ms(x["id_str"]) for x in left)
+                log(f"Antrean: {len(left)} tweet menunggu, dilanjutkan pengecekan berikutnya.")
             break
         user = t["user"]["screen_name"]
         is_rt = "retweeted_status" in t
         src = t["retweeted_status"] if is_rt else t
         media = [] if (is_rt and not C.INCLUDE_RETWEETS) else extract_media(src)
 
-        if src["id_str"] in seen:            # tweet asli sudah pernah dikirim (repost dari akun lain)
+        sent_ids = state.setdefault("sent_ids", [])
+        sent_media = state.setdefault("sent_media", [])
+        keys = [k for k in (media_key(m["url"]) for m in media) if k]
+        if src["id_str"] in seen or src["id_str"] in sent_ids:   # tweet asli sudah pernah diproses / dikirim
+            skipped += 1
+        elif keys and all(k in sent_media for k in keys):      # foto/video yang sama sudah pernah dikirim
+            log(f"[{user}] skip {src['id_str']} (media sama sudah pernah terkirim)")
             skipped += 1
         elif not media:
             skipped += 1
@@ -523,6 +552,8 @@ def process(tweets, state):
                 filtered += 1
             elif send_tweet(t, src, media, user, topic):
                 log(f"[{user}] terkirim {src['id_str']} -> topic {topic or 'default'}")
+                sent_ids.extend(x for x in {src['id_str'], t['id_str']} if x not in sent_ids)
+                sent_media.extend(k for k in keys if k not in sent_media)
                 state.get("fail_counts", {}).pop(src["id_str"], None)
                 consecutive_fail = 0
                 sent += 1
@@ -547,6 +578,8 @@ def process(tweets, state):
                                       "text": f"{text}\n\n🔗 {link}\n⚠️ Media gagal diupload setelah {n}x percobaan, lihat di link."},
                       topic=topic):
                     log(f"[{user}] {src['id_str']} gagal {n}x -> dikirim sebagai teks + link")
+                    sent_ids.extend(x for x in {src['id_str'], t['id_str']} if x not in sent_ids)
+                    sent_media.extend(k for k in keys if k not in sent_media)
                     fails.pop(src["id_str"], None)
                     sent += 1
                 else:
@@ -851,7 +884,9 @@ def run(loop=True):
                 tweets = collect(page, state, cover_since_ms=cover)
                 process(tweets, state)
                 if tweets:  # sukses hanya kalau tweet benar-benar terbaca
-                    state["last_ok"] = time.time()
+                    backlog = state.get("backlog_oldest_ms", 0)
+                    # masih ada antrean -> titik "terakhir sukses" = tweet tertua yang belum terkirim
+                    state["last_ok"] = backlog / 1000 if backlog else time.time()
                     state["x_error_count"] = 0
                     state["empty_count"] = 0
                     save_state(state)
@@ -925,14 +960,26 @@ def main():
     if mode == "reset":
         save_state({"since_ms": 0, "seen": []})
         return print("Riwayat direset. Pengecekan berikutnya dimulai dari tweet terbaru.")
+    if mode == "catchup":
+        hours = float(sys.argv[2]) if len(sys.argv) > 2 else 24
+        state = load_state()
+        point_ms = int((time.time() - hours * 3600) * 1000)
+        state["last_ok"] = point_ms / 1000                       # scroll mundur sampai titik ini
+        state["since_ms"] = min(state.get("since_ms") or point_ms, point_ms)
+        state["backlog_oldest_ms"] = point_ms
+        save_state(state)                                       # daftar "sudah terkirim" TIDAK dihapus
+        return print(f"OK. Saat run.bat jalan, bot scroll mundur {hours:g} jam dan hanya mengirim tweet "
+                     "yang BELUM pernah terkirim (tidak ada kiriman ganda).")
     if mode == "backfill":
         hours = float(sys.argv[2]) if len(sys.argv) > 2 else 3
         state = load_state()
         state["since_ms"] = int((time.time() - hours * 3600) * 1000)
         state["seen"] = [i for i in state["seen"] if tweet_time_ms(i) < state["since_ms"]]
         state["last_ok"] = state["since_ms"] / 1000   # mengejar ketinggalan scroll mundur sampai titik ini
-        save_state(state)
-        return print(f"OK. Tweet dari {hours:g} jam terakhir yang belum terkirim akan dikirim saat run.bat jalan.")
+        state["backlog_oldest_ms"] = state["since_ms"]
+        save_state(state)   # catatan "sudah terkirim" (sent_ids / sent_media) TIDAK dihapus -> tidak ada kiriman ganda
+        return print(f"OK. Tweet dari {hours:g} jam terakhir diproses ulang (termasuk yang dulu di-skip), "
+                     "tapi yang sudah pernah terkirim tidak dikirim lagi.")
 
     BOT_TOKEN, CHAT_ID = load_secrets()
     if not BOT_TOKEN or not CHAT_ID:
