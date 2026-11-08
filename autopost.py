@@ -327,14 +327,18 @@ def tg(method, data, files=None, topic=""):
     for v in (files or {}).values():
         if isinstance(v, tuple) and len(v) > 1 and isinstance(v[1], (bytes, bytearray)):
             size += len(v[1])
-    # upload besar butuh waktu: minimal 3 menit, +1 menit per 2 MB, maks 20 menit
-    write_timeout = min(max(180, size / (2 * 1024 * 1024) * 60), 1200)
+    # upload besar butuh waktu: minimal 2 menit, +1 menit per 4 MB, maks 8 menit
+    write_timeout = min(max(120, size / (4 * 1024 * 1024) * 60), 480)
+    if size > 5 * 1024 * 1024:
+        log(f"Mengupload {method} {size / 1024 / 1024:.1f} MB ke Telegram (batas {write_timeout / 60:.0f} menit)...")
     for attempt in range(3):
         try:
-            r = requests.post(url, data=data, files=files, timeout=(30, write_timeout))
+            r = requests.post(url, data=data, files=files, timeout=write_timeout)  # satu angka: berlaku utk kirim & terima
             body = r.json()
         except (requests.RequestException, ValueError) as e:
             log(f"Telegram {method} error: {(str(e).replace(BOT_TOKEN, '<TOKEN>') if BOT_TOKEN else str(e))[:200]}")
+            if size > 5 * 1024 * 1024:
+                return False   # upload besar gagal: jangan ulang file yang sama, pakai fallback video kecil
             time.sleep(5)
             continue
         if body.get("ok"):
@@ -361,21 +365,27 @@ def send_group(items, caption, topic):
         data = {"chat_id": CHAT_ID, "caption": caption}
         if typ == "video":
             data["supports_streaming"] = "true"
+        if it.get("url_only"):
+            data[typ] = it["url_only"]
+            return tg(method, data, topic=topic)
         return tg(method, data, files={typ: it["file"]}, topic=topic)
 
     for start in range(0, len(items), 10):
         chunk = items[start:start + 10]
         files, media = {}, []
         for i, it in enumerate(chunk):
-            key = f"f{i}"
-            files[key] = it["file"]
-            obj = {"type": tg_type(it), "media": f"attach://{key}"}
+            if it.get("url_only"):
+                obj = {"type": tg_type(it), "media": it["url_only"]}
+            else:
+                key = f"f{i}"
+                files[key] = it["file"]
+                obj = {"type": tg_type(it), "media": f"attach://{key}"}
             if start == 0 and i == 0 and caption:
                 obj["caption"] = caption
             if obj["type"] == "video":
                 obj["supports_streaming"] = True
             media.append(obj)
-        if not tg("sendMediaGroup", {"chat_id": CHAT_ID, "media": json.dumps(media)}, files=files, topic=topic):
+        if not tg("sendMediaGroup", {"chat_id": CHAT_ID, "media": json.dumps(media)}, files=files or None, topic=topic):
             return False
     return True
 
@@ -403,14 +413,40 @@ def send_tweet(t, src, media, user, topic):
     if not photos and not videos:
         return tg("sendMessage", {"chat_id": CHAT_ID, "text": caption}, topic=topic)
 
-    def send_all(ph, vi, cap):
-        groups = [g for g in (ph, vi) if g] if C.SEND_MODE == "document" else [ph + vi]
-        for gi, g in enumerate(groups):
-            if not send_group(g, cap if gi == 0 else "", topic):
-                return False
-        return True
+    photos_done = [False]   # foto cukup dikirim sekali walau video dicoba berkali-kali
 
+    def send_all(ph, vi, cap):
+        if C.SEND_MODE == "document" or photos_done[0]:
+            if ph and not photos_done[0]:
+                if not send_group(ph, cap, topic):
+                    return False
+                photos_done[0] = True
+                cap = ""                      # caption sudah ikut di foto
+            elif photos_done[0]:
+                cap = ""
+            return send_group(vi, cap, topic) if vi else True
+        return send_group(ph + vi, cap, topic)
+
+    vids = [m for m in media if m["kind"] == "video"]
+
+    def try_url():
+        """Minta Telegram mengambil video langsung dari server X (tanpa upload dari PC)."""
+        levels = max(len(m.get("urls") or [m["url"]]) for m in vids)
+        for level in range(levels):
+            by_url = [{"kind": "video",
+                       "url_only": (m.get("urls") or [m["url"]])[min(level, len(m.get("urls") or [m["url"]]) - 1)]}
+                      for m in vids]
+            if send_all(photos, by_url, caption):
+                log(f"Video terkirim lewat URL{' (kualitas tertinggi)' if level == 0 else f' (varian ke-{level + 1})'}.")
+                return True
+        return False
+
+    url_first = getattr(C, "VIDEO_VIA_URL_FIRST", True)
+    if vids and url_first and try_url():
+        return True
     if send_all(photos, videos, caption):
+        return True
+    if vids and not url_first and try_url():
         return True
     if videos:   # upload video gagal (biasanya terlalu besar / koneksi lambat): coba versi lebih kecil
         small_mb = getattr(C, "SMALL_VIDEO_MB", 15)
