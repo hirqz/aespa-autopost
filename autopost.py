@@ -284,8 +284,9 @@ def extract_media(src):
     return out
 
 
-def download(item, base, idx):
-    """Unduh media; coba ulang & turun ke kualitas berikutnya kalau gagal / >50MB."""
+def download(item, base, idx, max_bytes=None):
+    """Unduh media; coba ulang & turun ke kualitas berikutnya kalau gagal / terlalu besar."""
+    max_bytes = max_bytes or MAX_UPLOAD_BYTES
     reasons = []
     for url in item.get("urls") or [item["url"]]:
         for attempt in range(3):
@@ -297,8 +298,8 @@ def download(item, base, idx):
                 time.sleep(2 * (attempt + 1))
                 continue
             if r.status_code == 200 and r.content:
-                if len(r.content) > MAX_UPLOAD_BYTES:
-                    reasons.append(">50MB")
+                if len(r.content) > max_bytes:
+                    reasons.append(f">{max_bytes // (1024 * 1024)}MB")
                     break  # coba varian berikutnya (kualitas lebih rendah)
                 if item["kind"] == "video":
                     ext = "mp4"
@@ -322,12 +323,18 @@ def tg(method, data, files=None, topic=""):
     t = str(topic or "").strip()
     if t and t != "1" and t.lower() != "general":
         data["message_thread_id"] = t
+    size = 0
+    for v in (files or {}).values():
+        if isinstance(v, tuple) and len(v) > 1 and isinstance(v[1], (bytes, bytearray)):
+            size += len(v[1])
+    # upload besar butuh waktu: minimal 3 menit, +1 menit per 2 MB, maks 20 menit
+    write_timeout = min(max(180, size / (2 * 1024 * 1024) * 60), 1200)
     for attempt in range(3):
         try:
-            r = requests.post(url, data=data, files=files, timeout=180)
+            r = requests.post(url, data=data, files=files, timeout=(30, write_timeout))
             body = r.json()
         except (requests.RequestException, ValueError) as e:
-            log(f"Telegram {method} error: {e}")
+            log(f"Telegram {method} error: {(str(e).replace(BOT_TOKEN, '<TOKEN>') if BOT_TOKEN else str(e))[:200]}")
             time.sleep(5)
             continue
         if body.get("ok"):
@@ -396,11 +403,26 @@ def send_tweet(t, src, media, user, topic):
     if not photos and not videos:
         return tg("sendMessage", {"chat_id": CHAT_ID, "text": caption}, topic=topic)
 
-    groups = [g for g in (photos, videos) if g] if C.SEND_MODE == "document" else [photos + videos]
-    for gi, g in enumerate(groups):
-        if not send_group(g, caption if gi == 0 else "", topic):
-            return False
-    return True
+    def send_all(ph, vi, cap):
+        groups = [g for g in (ph, vi) if g] if C.SEND_MODE == "document" else [ph + vi]
+        for gi, g in enumerate(groups):
+            if not send_group(g, cap if gi == 0 else "", topic):
+                return False
+        return True
+
+    if send_all(photos, videos, caption):
+        return True
+    if videos:   # upload video gagal (biasanya terlalu besar / koneksi lambat): coba versi lebih kecil
+        small_mb = getattr(C, "SMALL_VIDEO_MB", 15)
+        log(f"Upload gagal, mencoba video versi lebih kecil (≤{small_mb} MB)...")
+        small = []
+        for i, item in enumerate(m for m in media if m["kind"] == "video"):
+            f = download(item, f"{src_user}_{src['id_str']}", i, max_bytes=small_mb * 1024 * 1024)
+            if f:
+                small.append({"kind": "video", "file": f})
+        if small and send_all(photos, small, caption + "\n(video versi lebih kecil, kualitas penuh di link)"):
+            return True
+    return False
 
 
 # ============================ PROSES ============================
@@ -445,7 +467,7 @@ def process(tweets, state):
               "Tweet tidak ditandai, kirim debug_tweets.json ke pengembang.", state)
         return 0
 
-    sent = skipped = filtered = 0
+    sent = skipped = filtered = consecutive_fail = 0
     for t in new:
         if sent >= C.MAX_POSTS_PER_RUN:
             break
@@ -465,11 +487,35 @@ def process(tweets, state):
                 filtered += 1
             elif send_tweet(t, src, media, user, topic):
                 log(f"[{user}] terkirim {src['id_str']} -> topic {topic or 'default'}")
+                state.get("fail_counts", {}).pop(src["id_str"], None)
+                consecutive_fail = 0
                 sent += 1
                 time.sleep(C.DELAY_BETWEEN_POSTS)
             else:
-                log(f"[{user}] gagal kirim {t['id_str']}, dicoba lagi pengecekan berikutnya")
-                break
+                fails = state.setdefault("fail_counts", {})
+                n = fails.get(src["id_str"], 0) + 1
+                fails[src["id_str"]] = n
+                consecutive_fail += 1
+                max_try = getattr(C, "MAX_SEND_ATTEMPTS", 3)
+                if n < max_try:
+                    log(f"[{user}] gagal kirim {src['id_str']} (percobaan {n}/{max_try}), lanjut ke tweet lain")
+                    save_state(state)
+                    if consecutive_fail >= 3:   # banyak gagal beruntun -> kemungkinan koneksi/Telegram bermasalah
+                        log("3 kiriman gagal beruntun, koneksi ke Telegram mungkin bermasalah. Berhenti dulu.")
+                        break
+                    continue   # JANGAN tandai seen; dicoba lagi pengecekan berikutnya
+                # sudah gagal berkali-kali: kirim teks + link saja supaya antrean tidak tertahan
+                text = re.sub(r"\s*https://t\.co/\w+\s*$", "", src.get("full_text") or "").strip()[:800]
+                link = f"https://x.com/{(src.get('user') or {}).get('screen_name') or user}/status/{src['id_str']}"
+                if tg("sendMessage", {"chat_id": CHAT_ID,
+                                      "text": f"{text}\n\n🔗 {link}\n⚠️ Media gagal diupload setelah {n}x percobaan, lihat di link."},
+                      topic=topic):
+                    log(f"[{user}] {src['id_str']} gagal {n}x -> dikirim sebagai teks + link")
+                    fails.pop(src["id_str"], None)
+                    sent += 1
+                else:
+                    save_state(state)
+                    continue
         state["seen"].append(t["id_str"])
         seen.add(t["id_str"])
         if src["id_str"] != t["id_str"]:
