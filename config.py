@@ -82,6 +82,8 @@ ACCOUNT_RULES = {
     "soshirevelae": {"all": "winter"},
     "stupidcheesecat": {"all": "winter"},
     "4K__POP": {"karina": ["#Karina"], "winter": ["#WINTER"]},
+    "karina_bubble_": {"all": "karina"},
+    "minmoag": {"all": "winter"},
 }
 
 BUBBLE_MARKERS = ["💬", "🫧", "💭", "bbl", "bubble"]
