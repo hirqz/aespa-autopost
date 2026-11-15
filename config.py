@@ -27,6 +27,9 @@ ACCOUNTS = [
     "stupidcheesecat",
     "soshirevelae",
     "yjmsmine",
+    "blue_karina_",
+    "taerina09",
+    "4K__POP",
 ]
 
 # send: True = dikirim, False = di-skip
@@ -51,7 +54,7 @@ MEMBERS = {
         "jisoo", "지수", "rose", "로제", "jennie", "제니", "lisa", "리사", "blackpink",
         "taeyeon", "태연", "yoona", "윤아", "sunny",
         "yeri", "예리", "seohyun", "서현", "tiffany", "티파니", "snsd", "girls' generation",
-        "joy", "wendy", "nayeon", "Harassment", "Abuse", "KAIA",
+        "joy", "wendy", "nayeon", "Harassment", "Abuse", "KAIA", "Chaeyeon",
     ]},
 }
 
@@ -76,7 +79,11 @@ ACCOUNT_RULES = {
     "mjkmwntr": {"all": "winter"},
     "soshirevelae": {"all": "winter"},
     "stupidcheesecat": {"all": "winter"},
+    "4K__POP": {"karina": ["#Karina"], "winter": ["#WINTER"]},
 }
+
+BUBBLE_MARKERS = ["💬", "🫧", "💭", "bbl", "bubble"]
+BUBBLE_TOPICS  = {"karina": "2", "winter": "3"}
 
 SEND_UNMATCHED = False   # tweet tanpa nama member: False = skip
 SKIP_IF_MIXED = True     # karina/winter + member/idol lain: True = skip
