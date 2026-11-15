@@ -72,7 +72,7 @@ SENT_LIMIT = 50000   # ID tweet & media yang SUDAH TERKIRIM (disimpan jauh lebih
 
 def save_state(s):
     s["seen"] = s["seen"][-SEEN_LIMIT:]
-    for k in ("sent_ids", "sent_media"):
+    for k in ("sent_ids", "sent_media", "sent_dest"):
         if k in s:
             s[k] = s[k][-SENT_LIMIT:]
     tmp = STATE_FILE + ".tmp"
@@ -187,10 +187,25 @@ def has_keyword(hay, k):
     return k in hay
 
 
-def classify(src, user):
+def _hay(src):
     hashtags = " ".join("#" + h.get("text", "") for h in (src.get("entities") or {}).get("hashtags", []))
-    hay = _norm((src.get("full_text") or "") + " " + hashtags)
-    rules = C.ACCOUNT_RULES.get(user.lower(), {})
+    return _norm((src.get("full_text") or "") + " " + hashtags)
+
+
+def _rules(user):
+    """ACCOUNT_RULES tanpa peduli huruf besar/kecil username."""
+    return {k.lower(): v for k, v in C.ACCOUNT_RULES.items()}.get(user.lower(), {})
+
+
+def is_bubble(src):
+    """Konten bubble kalau teks berisi salah satu BUBBLE_MARKERS (emoji / kata utuh)."""
+    hay = _hay(src)
+    return any(has_keyword(hay, _norm(m)) for m in getattr(C, "BUBBLE_MARKERS", []))
+
+
+def classify(src, user):
+    hay = _hay(src)
+    rules = _rules(user)
 
     matched = [name for name, m in C.MEMBERS.items()
                if any(has_keyword(hay, _norm(k)) for k in m.get("keywords", []) + rules.get(name, []))]
@@ -406,16 +421,26 @@ def send_group(items, caption, topic):
     return True
 
 
-def send_tweet(t, src, media, user, topic):
+def build_caption(t, src, user, limit=850):
     is_rt = "retweeted_status" in t
     src_user = (src.get("user") or {}).get("screen_name") or user
     text = re.sub(r"\s*https://t\.co/\w+\s*$", "", src.get("full_text") or "").strip()
     link = f"https://x.com/{src_user}/status/{src['id_str']}"
     header = f"🔁 @{user} repost @{src_user}\n\n" if is_rt else ""
     body = header + text
-    if len(body) > 850:
-        body = body[:849] + "…"
-    caption = f"{body}\n\n🔗 {link}"
+    if len(body) > limit:
+        body = body[:limit - 1] + "…"
+    return f"{body}\n\n🔗 {link}"
+
+
+def send_text(t, src, user, topic):
+    """Bubble tanpa media: kirim teks + link saja."""
+    return tg("sendMessage", {"chat_id": CHAT_ID, "text": build_caption(t, src, user, limit=3800)}, topic=topic)
+
+
+def send_tweet(t, src, media, user, topic):
+    src_user = (src.get("user") or {}).get("screen_name") or user
+    caption = build_caption(t, src, user)
 
     photos, videos, failed = [], [], 0
     for i, item in enumerate(media):
@@ -505,7 +530,7 @@ def process(tweets, state):
     def _src(t):
         return t["retweeted_status"] if "retweeted_status" in t else t
 
-    if len(new) >= 5 and not any(extract_media(_src(t)) for t in new):
+    if len(new) >= 5 and not any(extract_media(_src(t)) or is_bubble(_src(t)) for t in new):
         path = os.path.join(BASE, "debug_tweets.json")
         try:
             sample = [{k: v for k, v in _src(t).items() if k != "retweeted_status"} for t in new[:5]]
@@ -543,48 +568,76 @@ def process(tweets, state):
         elif keys and all(k in sent_media for k in keys):      # foto/video yang sama sudah pernah dikirim
             log(f"[{user}] skip {src['id_str']} (media sama sudah pernah terkirim)")
             skipped += 1
-        elif not media:
-            skipped += 1
         else:
             ok_send, matched, topic = classify(src, user)
-            if not ok_send:
+            bubble = is_bubble(src)
+            inc = [n for n in matched if C.MEMBERS.get(n, {}).get("send")]
+            dests = []
+            if ok_send:
+                if media and topic:
+                    dests.append(topic)                                   # postingan bermedia -> topic 18
+                if bubble:                                                # bubble -> topic member (2 / 3)
+                    dests += [str(C.BUBBLE_TOPICS[m]) for m in inc if m in getattr(C, "BUBBLE_TOPICS", {})]
+            dests = list(dict.fromkeys(d for d in dests if d))
+
+            if not media and not bubble:
+                skipped += 1
+            elif not ok_send:
                 log(f"[{user}] skip {src['id_str']} (member: {','.join(matched) or '-'})")
                 filtered += 1
-            elif send_tweet(t, src, media, user, topic):
-                log(f"[{user}] terkirim {src['id_str']} -> topic {topic or 'default'}")
-                sent_ids.extend(x for x in {src['id_str'], t['id_str']} if x not in sent_ids)
-                sent_media.extend(k for k in keys if k not in sent_media)
-                state.get("fail_counts", {}).pop(src["id_str"], None)
-                consecutive_fail = 0
-                sent += 1
-                time.sleep(C.DELAY_BETWEEN_POSTS)
+            elif not dests:
+                log(f"[{user}] skip {src['id_str']} (bubble tanpa media, member tidak dikenali)")
+                skipped += 1
             else:
-                fails = state.setdefault("fail_counts", {})
-                n = fails.get(src["id_str"], 0) + 1
-                fails[src["id_str"]] = n
-                consecutive_fail += 1
-                max_try = getattr(C, "MAX_SEND_ATTEMPTS", 3)
-                if n < max_try:
-                    log(f"[{user}] gagal kirim {src['id_str']} (percobaan {n}/{max_try}), lanjut ke tweet lain")
-                    save_state(state)
-                    if consecutive_fail >= 3:   # banyak gagal beruntun -> kemungkinan koneksi/Telegram bermasalah
-                        log("3 kiriman gagal beruntun, koneksi ke Telegram mungkin bermasalah. Berhenti dulu.")
-                        break
-                    continue   # JANGAN tandai seen; dicoba lagi pengecekan berikutnya
-                # sudah gagal berkali-kali: kirim teks + link saja supaya antrean tidak tertahan
-                text = re.sub(r"\s*https://t\.co/\w+\s*$", "", src.get("full_text") or "").strip()[:800]
-                link = f"https://x.com/{(src.get('user') or {}).get('screen_name') or user}/status/{src['id_str']}"
-                if tg("sendMessage", {"chat_id": CHAT_ID,
-                                      "text": f"{text}\n\n🔗 {link}\n⚠️ Media gagal diupload setelah {n}x percobaan, lihat di link."},
-                      topic=topic):
-                    log(f"[{user}] {src['id_str']} gagal {n}x -> dikirim sebagai teks + link")
+                sent_dest = state.setdefault("sent_dest", [])
+                pending = [d for d in dests if f"{src['id_str']}:{d}" not in sent_dest]
+                failed = []
+                for d in pending:
+                    ok = send_tweet(t, src, media, user, d) if media else send_text(t, src, user, d)
+                    if ok:
+                        sent_dest.append(f"{src['id_str']}:{d}")
+                        time.sleep(C.DELAY_BETWEEN_POSTS)
+                    else:
+                        failed.append(d)
+                kind = ("bubble" if bubble else "media") + ("" if media else " (teks)")
+                if not failed:
+                    log(f"[{user}] terkirim {src['id_str']} [{kind}] -> topic {', '.join(dests)}")
+                    sent_ids.extend(x for x in {src['id_str'], t['id_str']} if x not in sent_ids)
+                    sent_media.extend(k for k in keys if k not in sent_media)
+                    state.get("fail_counts", {}).pop(src["id_str"], None)
+                    consecutive_fail = 0
+                    sent += 1
+                else:
+                    fails = state.setdefault("fail_counts", {})
+                    n = fails.get(src["id_str"], 0) + 1
+                    fails[src["id_str"]] = n
+                    consecutive_fail += 1
+                    max_try = getattr(C, "MAX_SEND_ATTEMPTS", 3)
+                    if n < max_try:
+                        log(f"[{user}] gagal kirim {src['id_str']} ke topic {', '.join(failed)} "
+                            f"(percobaan {n}/{max_try}), lanjut ke tweet lain")
+                        save_state(state)
+                        if consecutive_fail >= 3:   # banyak gagal beruntun -> kemungkinan koneksi/Telegram bermasalah
+                            log("3 kiriman gagal beruntun, koneksi ke Telegram mungkin bermasalah. Berhenti dulu.")
+                            break
+                        continue   # JANGAN tandai seen; topic yang gagal dicoba lagi pengecekan berikutnya
+                    # sudah gagal berkali-kali: kirim teks + link ke topic yang gagal supaya antrean tidak tertahan
+                    still = []
+                    for d in failed:
+                        if tg("sendMessage", {"chat_id": CHAT_ID, "text": build_caption(t, src, user, limit=800)
+                                              + f"\n⚠️ Media gagal diupload setelah {n}x percobaan, lihat di link."},
+                              topic=d):
+                            sent_dest.append(f"{src['id_str']}:{d}")
+                        else:
+                            still.append(d)
+                    if still:
+                        save_state(state)
+                        continue
+                    log(f"[{user}] {src['id_str']} gagal {n}x -> dikirim sebagai teks + link ke topic {', '.join(failed)}")
                     sent_ids.extend(x for x in {src['id_str'], t['id_str']} if x not in sent_ids)
                     sent_media.extend(k for k in keys if k not in sent_media)
                     fails.pop(src["id_str"], None)
                     sent += 1
-                else:
-                    save_state(state)
-                    continue
         state["seen"].append(t["id_str"])
         seen.add(t["id_str"])
         if src["id_str"] != t["id_str"]:
@@ -593,7 +646,7 @@ def process(tweets, state):
         save_state(state)
 
     log(f"Timeline: {len(uniq)} tweet, dari akun dipantau: {len(mine)}, baru: {len(new)} | "
-        f"terkirim: {sent}, skip tanpa media: {skipped}, skip bukan karina/winter: {filtered}")
+        f"terkirim: {sent}, skip tanpa media/lainnya: {skipped}, skip bukan karina/winter: {filtered}")
     return sent
 
 
