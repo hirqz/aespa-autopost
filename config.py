@@ -30,6 +30,8 @@ ACCOUNTS = [
     "blue_karina_",
     "taerina09",
     "4K__POP",
+    "KARINA_bubble_",
+    "minmoag",
 ]
 
 # send: True = dikirim, False = di-skip
