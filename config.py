@@ -32,6 +32,8 @@ ACCOUNTS = [
     "4K__POP",
     "KARINA_bubble_",
     "minmoag",
+    "whitefor010101",
+    "Quartersung",
 ]
 
 # send: True = dikirim, False = di-skip
@@ -84,6 +86,8 @@ ACCOUNT_RULES = {
     "4K__POP": {"karina": ["#Karina"], "winter": ["#WINTER"]},
     "karina_bubble_": {"all": "karina"},
     "minmoag": {"all": "winter"},
+    "whitefor010101": {"all": "winter"},
+    "Quartersung": {"all": "winter"},
 }
 
 BUBBLE_MARKERS = ["💬", "🫧", "💭", "bbl", "bubble"]
