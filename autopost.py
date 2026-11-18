@@ -94,6 +94,19 @@ def _user_screen_name(result):
             or (user.get("legacy") or {}).get("screen_name") or "")
 
 
+def real_media(lst):
+    """Daftar media yang benar-benar berisi URL (bukan sisa data yang cuma berisi link)."""
+    return [m for m in (lst or []) if isinstance(m, dict)
+            and (m.get("media_url_https") or m.get("original_img_url") or m.get("video_info"))]
+
+
+def media_hint(src):
+    """True kalau tweet jelas punya foto/video (ada link /photo/ atau /video/), walau medianya belum terbaca."""
+    raw = src.get("_raw") or {}
+    stubs = ((src.get("entities") or {}).get("media") or []) + list(raw.get("media_entities2") or [])
+    return any(re.search(r"/(photo|video)/\d", str(m.get("expanded_url", ""))) for m in stubs if isinstance(m, dict))
+
+
 def normalize(result):
     """Ubah objek tweet GraphQL x.com menjadi format sederhana."""
     if not isinstance(result, dict):
@@ -104,12 +117,21 @@ def normalize(result):
     if not legacy:
         return None
     t = dict(legacy)
+    details = result.get("details") or {}          # format baru X (Nov 2026): teks & hashtag di sini
     t["id_str"] = legacy.get("id_str") or result.get("rest_id")
     note = (((result.get("note_tweet") or {}).get("note_tweet_results") or {}).get("result") or {})
-    t["full_text"] = html.unescape(note.get("text") or legacy.get("full_text") or "")  # &amp; -> &
+    t["full_text"] = html.unescape(note.get("text") or legacy.get("full_text")
+                                   or details.get("full_text") or "")  # &amp; -> &
+    ents = dict(legacy.get("entities") or {})
+    if not ents.get("hashtags") and details.get("hashtag_entities"):
+        ents["hashtags"] = details["hashtag_entities"]
+    t["entities"] = ents
+    if not real_media((legacy.get("extended_entities") or {}).get("media")) and real_media(result.get("media_entities2")):
+        t["extended_entities"] = {"media": result["media_entities2"]}   # format baru: media di media_entities2
     t["user"] = {"screen_name": _user_screen_name(result)}
     t["_raw"] = result   # objek asli dari X (dipakai kalau lokasi media berubah)
-    rt = ((legacy.get("retweeted_status_result") or {}).get("result"))
+    rt = ((legacy.get("retweeted_status_result") or legacy.get("retweeted_status_results")
+           or result.get("retweeted_status_results") or {}).get("result"))
     t["retweeted_status"] = normalize(rt) if rt else None
     if not t["retweeted_status"]:
         t.pop("retweeted_status")
@@ -147,7 +169,8 @@ def parse_timeline_json(data):
                     seen_ids.add(t["id_str"])
                     tweets.append(t)
             for k, v in o.items():
-                if k in ("tweet_results", "retweeted_status_result", "quoted_status_result"):
+                if k in ("tweet_results", "retweeted_status_result", "quoted_status_result",
+                         "retweeted_status_results", "quoted_status_results"):
                     continue    # sudah diproses / bagian dari tweet lain
                 walk(v, promoted)
         elif isinstance(o, list):
@@ -256,13 +279,16 @@ def orig_photo_url(u):
     return photo_urls(u)[0]
 
 
-SKIP_MEDIA_KEYS = ("retweeted_status_result", "quoted_status_result", "core", "user_results",
+SKIP_MEDIA_KEYS = ("retweeted_status_result", "quoted_status_result", "retweeted_status_results",
+                   "quoted_status_results", "core", "user_results",
                    "card", "author_community_relationship", "birdwatch_pivot", "community_results")
 
 
 def _media_items(src):
     """Daftar objek media mentah. Lokasi standar dulu, lalu cari di mana pun dalam tweet."""
-    lst = (src.get("extended_entities") or src.get("entities") or {}).get("media") or []
+    lst = real_media((src.get("extended_entities") or {}).get("media")) \
+        or real_media((src.get("entities") or {}).get("media")) \
+        or real_media((src.get("_raw") or {}).get("media_entities2"))
     if lst:
         return lst
     found, keys = [], set()
@@ -545,6 +571,7 @@ def process(tweets, state):
         return 0
 
     sent = skipped = filtered = consecutive_fail = 0
+    unread = []
     state["backlog_oldest_ms"] = 0
     for t in new:
         if sent >= C.MAX_POSTS_PER_RUN:
@@ -568,6 +595,11 @@ def process(tweets, state):
         elif keys and all(k in sent_media for k in keys):      # foto/video yang sama sudah pernah dikirim
             log(f"[{user}] skip {src['id_str']} (media sama sudah pernah terkirim)")
             skipped += 1
+        elif not media and media_hint(src):
+            # tweet jelas bermedia tapi medianya tidak terbaca -> kemungkinan format X berubah.
+            # JANGAN tandai diproses, supaya bisa dikirim setelah diperbaiki.
+            unread.append(src)
+            continue
         else:
             ok_send, matched, topic = classify(src, user)
             bubble = is_bubble(src)
@@ -645,6 +677,17 @@ def process(tweets, state):
             seen.add(src["id_str"])
         save_state(state)
 
+    if unread:
+        try:
+            with open(os.path.join(BASE, "debug_tweets.json"), "w", encoding="utf-8") as f:
+                json.dump([{k: v for k, v in x.items() if k != "retweeted_status"} for x in unread[:5]],
+                          f, ensure_ascii=False, default=str)
+        except Exception:
+            pass
+        log(f"{len(unread)} tweet bermedia tapi medianya TIDAK terbaca (format X berubah?). "
+            "Tidak ditandai; contoh disimpan ke debug_tweets.json.")
+        alert(f"{len(unread)} tweet bermedia tidak bisa dibaca medianya (format data X kemungkinan berubah). "
+              "Tweet tidak ditandai, kirim debug_tweets.json ke pengembang.", state)
     log(f"Timeline: {len(uniq)} tweet, dari akun dipantau: {len(mine)}, baru: {len(new)} | "
         f"terkirim: {sent}, skip tanpa media/lainnya: {skipped}, skip bukan karina/winter: {filtered}")
     return sent
