@@ -24,7 +24,6 @@ ACCOUNTS = [
     "mjkmwntr",
     "hiura88",
     "dolldollmin",
-    "stupidcheesecat",
     "soshirevelae",
     "yjmsmine",
     "blue_karina_",
@@ -34,6 +33,12 @@ ACCOUNTS = [
     "minmoag",
     "whitefor010101",
     "Quartersung",
+    "salvation_0101",
+    "mistletoe_01",
+    "confetti_wt",
+    "VirginSnow0101",
+    "yuseong0101",
+    "minsickface",
 ]
 
 # send: True = dikirim, False = di-skip
@@ -82,12 +87,17 @@ ACCOUNT_RULES = {
     "winteraphy": {"all": "winter"},
     "mjkmwntr": {"all": "winter"},
     "soshirevelae": {"all": "winter"},
-    "stupidcheesecat": {"all": "winter"},
     "4K__POP": {"karina": ["#Karina"], "winter": ["#WINTER"]},
     "karina_bubble_": {"all": "karina"},
     "minmoag": {"all": "winter"},
     "whitefor010101": {"all": "winter"},
     "Quartersung": {"all": "winter"},
+    "salvation_0101": {"all": "winter"},
+    "mistletoe_01": {"all": "winter"},
+    "confetti_wt": {"all": "winter"},
+    "VirginSnow0101": {"all": "winter"},
+    "dolldollmin": {"all": "winter"},
+    "minsickface": {"all": "winter"},
 }
 
 BUBBLE_MARKERS = ["💬", "🫧", "💭", "bbl", "bubble"]
